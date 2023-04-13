@@ -1,0 +1,193 @@
+#! /usr/bin/env python
+
+import argparse
+import re
+import pandas as pd
+import numpy as np
+from multiprocessing import Pool
+from os import scandir
+from pathlib import Path
+from pybedtools import BedTool as bt  # type: ignore
+from pybedtools import cleanup  # type: ignore
+from functools import partial
+from more_itertools import unzip
+
+
+def list_strats(
+    root: Path,
+    pat: list[str] = [],
+    ignore: list[str] = [],
+    mapper: dict[Path, Path] = {},
+) -> dict[Path, Path]:
+    def apply_mapper(x: Path) -> Path:
+        try:
+            return mapper[x]
+        except KeyError:
+            return x
+
+    def apply_pat(pat: list[str], x: Path) -> Path:
+        return (
+            apply_pat(pat[2:], Path(re.sub(pat[0], pat[1], str(x))))
+            if len(pat) > 0
+            else x
+        )
+
+    def match_any(s: Path) -> bool:
+        return any(map(lambda p: re.match(p, str(s)), ignore))
+
+    return {
+        apply_pat(pat, apply_mapper(p)): p
+        for f in scandir(root)
+        if f.is_dir()
+        for g in scandir(f)
+        if g.name.endswith(".bed.gz")
+        if not match_any(p := Path(f.name) / g.name)
+    }
+
+
+def read_map_file(path: Path) -> dict[Path, Path]:
+    df = pd.read_table(path, header=False)[[0, 1]]
+    return {r[0]: r[1] for r in df.rows}
+
+
+def map_strats(
+    root1: Path,
+    root2: Path,
+    mappath: Path | None,
+    rep: list[str],
+    ignoreA: list[str],
+    ignoreB: list[str],
+) -> list[tuple[Path, Path]]:
+    subs = read_map_file(mappath) if mappath is not None else {}
+    ss1 = list_strats(root1, rep, ignoreA, subs)
+    ss2 = list_strats(root2, [], ignoreB)
+    overlap = set(ss1) & set(ss2)
+    for f in set(ss1) - set(ss2):
+        print(f"only in A: {f}")
+    for f in set(ss2) - set(ss1):
+        print(f"only in B: {f}")
+    return [(ss1[f], ss2[f]) for f in overlap]
+
+
+def read_bed(path: Path) -> pd.DataFrame:
+    return pd.read_table(
+        path,
+        header=None,
+        dtype={0: str, 1: int, 2: int},
+        comment="#",
+    )
+
+
+def compare_beds(
+    root1: Path,
+    root2: Path,
+    chrs: list[str],
+    bed_paths: tuple[Path, Path],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    bed1 = bed_paths[0]
+    bed2 = bed_paths[1]
+    df2 = read_bed(root2 / bed2)
+    if len(chrs) > 0:
+        df2 = df2[df2[0].isin(chrs)]
+    df = (
+        bt()
+        .multi_intersect(i=[bt(root1 / bed1).fn, bt.from_dataframe(df2).fn])
+        .to_dataframe(names=["chrom", "start", "end", "n", "list", "inA", "inB"])
+    ).astype({"start": int, "end": int, "n": int, "inA": int, "inB": int})
+    cleanup()
+    # add some metadata showing if a region covered by only one bed file is
+    # adjacent to a region covered by both
+    df_chr = df.groupby("chrom")
+    prev_adj = df["start"] == df_chr["end"].shift(1, fill_value=-1)
+    next_adj = df_chr["start"].shift(-1, fill_value=-1) == df["end"]
+    prev_adj_shared = prev_adj & (df_chr["n"].shift(1, fill_value=-1) == 2)
+    next_adj_shared = next_adj & (df_chr["n"].shift(-1, fill_value=-1) == 2)
+    df["adj"] = np.where(
+        df["n"] > 1,
+        "shared",
+        np.where(
+            prev_adj_shared & next_adj_shared,
+            "<>",
+            np.where(
+                next_adj_shared,
+                ">",
+                np.where(
+                    prev_adj_shared,
+                    "<",
+                    ".",
+                ),
+            ),
+        ),
+    )
+    shared = df["adj"] == "shared"
+
+    anti = df[~shared].copy()
+    anti["bed"] = np.where(
+        anti["inA"] == 1,
+        0,
+        np.where(anti["inB"] == 1, 1, -1),
+    )
+    anti["bedA"] = bed1
+    anti["bedB"] = bed2
+    anti = anti[["chrom", "start", "end", "bed", "adj", "bedA", "bedB"]].copy()
+
+    length = df["end"] - df["start"]
+    total_shared = length[shared].sum()
+    total_A = length[df["inA"] == 1].sum()
+    total_B = length[df["inB"] == 1].sum()
+    diagnostics = pd.DataFrame(
+        {
+            "total_A": [total_A],
+            "total_B": [total_B],
+            "total_shared": [total_shared],
+            "shared_A": [total_shared / total_A * 100],
+            "shared_B": [total_shared / total_B * 100],
+            "bedA": [bed1],
+            "bedB": [bed2],
+        }
+    )
+    return (anti, diagnostics)
+
+
+def compare_all(args) -> None:
+    root1 = args.strat_rootA
+    root2 = args.strat_rootB
+    ss = map_strats(
+        root1,
+        root2,
+        args.map_path,
+        args.rep,
+        args.ignoreA,
+        args.ignoreB,
+    )
+    p = Pool()
+    chrs = args.chrs
+
+    anti, diagnostics = unzip(p.map(partial(compare_beds, root1, root2, chrs), ss))
+
+    def write_df(path: str, df: pd.DataFrame) -> None:
+        df.to_csv(path, header=True, sep="\t", index=False)
+
+    write_df(args.prefix + "_anti.bed", pd.concat(anti))
+    write_df(args.prefix + "_diagnostics.tsv", pd.concat(diagnostics))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="stratcomp",
+        description="compare stratifications",
+    )
+    parser.add_argument("strat_rootA", metavar="a")
+    parser.add_argument("strat_rootB", metavar="b")
+    parser.add_argument("prefix", metavar="p")
+    parser.add_argument("-c", "--chrs", default=[], nargs="+")
+    parser.add_argument("-m", "--map_path")
+    parser.add_argument("-r", "--rep", default=[], nargs="+")
+    parser.add_argument("-i", "--ignoreA", default=[], nargs="+")
+    parser.add_argument("-j", "--ignoreB", default=[], nargs="+")
+    args = parser.parse_args()
+    assert len(args.rep) % 2 == 0, "replacement args must be even number"
+    compare_all(args)
+
+
+main()
