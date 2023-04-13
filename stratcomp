@@ -177,14 +177,50 @@ def main():
         prog="stratcomp",
         description="compare stratifications",
     )
-    parser.add_argument("strat_rootA", metavar="a")
-    parser.add_argument("strat_rootB", metavar="b")
-    parser.add_argument("prefix", metavar="p")
-    parser.add_argument("-c", "--chrs", default=[], nargs="+")
-    parser.add_argument("-m", "--map_path")
-    parser.add_argument("-r", "--rep", default=[], nargs="+")
-    parser.add_argument("-i", "--ignoreA", default=[], nargs="+")
-    parser.add_argument("-j", "--ignoreB", default=[], nargs="+")
+    parser.add_argument(
+        "strat_rootA",
+        metavar="rootA",
+        help="directory of first stratification set to compare",
+    )
+    parser.add_argument(
+        "strat_rootB",
+        metavar="rootB",
+        help="directory of second stratification set to compare",
+    )
+    parser.add_argument("prefix", metavar="prefix", help="prefix of output")
+    parser.add_argument(
+        "-c",
+        "--chrs",
+        default=[],
+        nargs="+",
+        help="chromosomes to include (all if not given)",
+    )
+    parser.add_argument(
+        "-m",
+        "--map_path",
+        help="path to mapping file",
+    )
+    parser.add_argument(
+        "-r",
+        "--rep",
+        default=[],
+        nargs="+",
+        help="replacement strings",
+    )
+    parser.add_argument(
+        "-i",
+        "--ignoreA",
+        default=[],
+        nargs="+",
+        help="regular expressions for files to ignore from A",
+    )
+    parser.add_argument(
+        "-j",
+        "--ignoreB",
+        default=[],
+        nargs="+",
+        help="regular expressions for files to ignore from B",
+    )
     args = parser.parse_args()
     assert len(args.rep) % 2 == 0, "replacement args must be even number"
     compare_all(args)
