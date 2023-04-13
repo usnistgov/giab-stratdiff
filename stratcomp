@@ -46,8 +46,8 @@ def list_strats(
 
 
 def read_map_file(path: Path) -> dict[Path, Path]:
-    df = pd.read_table(path, header=False)[[0, 1]]
-    return {r[0]: r[1] for r in df.rows}
+    df = pd.read_table(path, header=None)[[0, 1]]
+    return {Path(r[0]): Path(r[1]) for r in df.itertuples(index=False)}
 
 
 def map_strats(
@@ -70,12 +70,16 @@ def map_strats(
 
 
 def read_bed(path: Path) -> pd.DataFrame:
-    return pd.read_table(
-        path,
-        header=None,
-        dtype={0: str, 1: int, 2: int},
-        comment="#",
-    )
+    try:
+        return pd.read_table(
+            path,
+            header=None,
+            dtype={"chrom": str, "start": int, "end": int},
+            names=["chrom", "start", "end"],
+            comment="#",
+        )
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def compare_beds(
@@ -86,15 +90,53 @@ def compare_beds(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     bed1 = bed_paths[0]
     bed2 = bed_paths[1]
+
+    def to_diagnostics(total_A: int, total_B: int, total_shared: int):
+        return pd.DataFrame(
+            {
+                "total_A": [total_A],
+                "total_B": [total_B],
+                "total_shared": [total_shared],
+                "shared_A": [total_shared / total_A * 100] if total_A > 0 else 0,
+                "shared_B": [total_shared / total_B * 100] if total_B > 0 else 0,
+                "bedA": [bed1],
+                "bedB": [bed2],
+            }
+        )
+
+    def add_bed_names(df: pd.DataFrame) -> pd.DataFrame:
+        df["bedA"] = bed1
+        df["bedB"] = bed2
+        return df
+
+    def bed_sum(df: pd.DataFrame) -> int:
+        return (df["end"] - df["start"]).sum()
+
+    df1 = read_bed(root1 / bed1)
     df2 = read_bed(root2 / bed2)
     if len(chrs) > 0:
-        df2 = df2[df2[0].isin(chrs)]
+        df2 = df2[df2["chrom"].isin(chrs)]
+
+    if df1.empty:
+        df = add_bed_names(df2.assign(**{"bed": 1, "adj": "."}))
+        return (df, to_diagnostics(0, bed_sum(df), 0))
+
+    if df2.empty:
+        df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
+        return (df, to_diagnostics(bed_sum(df), 0, 0))
+
     df = (
         bt()
-        .multi_intersect(i=[bt(root1 / bed1).fn, bt.from_dataframe(df2).fn])
+        .multi_intersect(
+            i=[
+                bt().from_dataframe(df1).fn,
+                bt.from_dataframe(df2).fn,
+            ]
+        )
         .to_dataframe(names=["chrom", "start", "end", "n", "list", "inA", "inB"])
     ).astype({"start": int, "end": int, "n": int, "inA": int, "inB": int})
     cleanup()
+
     # add some metadata showing if a region covered by only one bed file is
     # adjacent to a region covered by both
     df_chr = df.groupby("chrom")
@@ -127,26 +169,15 @@ def compare_beds(
         0,
         np.where(anti["inB"] == 1, 1, -1),
     )
+    anti = anti[["chrom", "start", "end", "bed", "adj"]].copy()
     anti["bedA"] = bed1
     anti["bedB"] = bed2
-    anti = anti[["chrom", "start", "end", "bed", "adj", "bedA", "bedB"]].copy()
 
     length = df["end"] - df["start"]
     total_shared = length[shared].sum()
     total_A = length[df["inA"] == 1].sum()
     total_B = length[df["inB"] == 1].sum()
-    diagnostics = pd.DataFrame(
-        {
-            "total_A": [total_A],
-            "total_B": [total_B],
-            "total_shared": [total_shared],
-            "shared_A": [total_shared / total_A * 100],
-            "shared_B": [total_shared / total_B * 100],
-            "bedA": [bed1],
-            "bedB": [bed2],
-        }
-    )
-    return (anti, diagnostics)
+    return (anti, to_diagnostics(total_A, total_B, total_shared))
 
 
 def compare_all(args) -> None:
