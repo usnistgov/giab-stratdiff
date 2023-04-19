@@ -66,7 +66,14 @@ def map_strats(
         print(f"only in A: {f}")
     for f in set(ss2) - set(ss1):
         print(f"only in B: {f}")
-    return [(ss1[f], ss2[f]) for f in overlap]
+    return sorted(
+        [(ss1[f], ss2[f]) for f in overlap],
+        key=lambda x: max(
+            (root1 / x[0]).stat().st_size,
+            (root2 / x[1]).stat().st_size,
+        ),
+        reverse=True,
+    )
 
 
 def read_bed(path: Path) -> pd.DataFrame:
@@ -96,6 +103,7 @@ def compare_beds(
             {
                 "total_A": [total_A],
                 "total_B": [total_B],
+                "diff_AB": total_A - total_B,
                 "total_shared": [total_shared],
                 "shared_A": [total_shared / total_A * 100] if total_A > 0 else 0,
                 "shared_B": [total_shared / total_B * 100] if total_B > 0 else 0,
@@ -115,6 +123,7 @@ def compare_beds(
     df1 = read_bed(root1 / bed1)
     df2 = read_bed(root2 / bed2)
     if len(chrs) > 0:
+        df1 = df1[df1["chrom"].isin(chrs)]
         df2 = df2[df2["chrom"].isin(chrs)]
 
     if df1.empty:
@@ -130,7 +139,7 @@ def compare_beds(
         .multi_intersect(
             i=[
                 bt().from_dataframe(df1).fn,
-                bt.from_dataframe(df2).fn,
+                bt().from_dataframe(df2).fn,
             ]
         )
         .to_dataframe(names=["chrom", "start", "end", "n", "list", "inA", "inB"])
@@ -170,14 +179,18 @@ def compare_beds(
         np.where(anti["inB"] == 1, 1, -1),
     )
     anti = anti[["chrom", "start", "end", "bed", "adj"]].copy()
-    anti["bedA"] = bed1
-    anti["bedB"] = bed2
+    anti["length"] = anti["end"] - anti["start"]
+    anti["bedA"] = str(bed1).replace(".bed.gz", "")
+    anti["bedB"] = str(bed2).replace(".bed.gz", "")
 
     length = df["end"] - df["start"]
     total_shared = length[shared].sum()
     total_A = length[df["inA"] == 1].sum()
     total_B = length[df["inB"] == 1].sum()
-    return (anti, to_diagnostics(total_A, total_B, total_shared))
+    return (
+        anti.rename(columns={"chrom": "#chrom"}),
+        to_diagnostics(total_A, total_B, total_shared),
+    )
 
 
 def compare_all(args) -> None:
@@ -200,7 +213,10 @@ def compare_all(args) -> None:
         df.to_csv(path, header=True, sep="\t", index=False)
 
     write_df(args.prefix + "_anti.bed", pd.concat(anti))
-    write_df(args.prefix + "_diagnostics.tsv", pd.concat(diagnostics))
+    write_df(
+        args.prefix + "_diagnostics.tsv",
+        pd.concat(diagnostics).sort_values(by="bedA"),
+    )
 
 
 def main():
