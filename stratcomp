@@ -134,16 +134,21 @@ def compare_beds(
         df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
         return (df, to_diagnostics(bed_sum(df), 0, 0))
 
+    coltypes = {
+        "chrom": str,
+        "start": int,
+        "end": int,
+        "n": int,
+        "list": str,
+        "inA": int,
+        "inB": int,
+    }
+
     df = (
         bt()
-        .multi_intersect(
-            i=[
-                bt().from_dataframe(df1).fn,
-                bt().from_dataframe(df2).fn,
-            ]
-        )
-        .to_dataframe(names=["chrom", "start", "end", "n", "list", "inA", "inB"])
-    ).astype({"start": int, "end": int, "n": int, "inA": int, "inB": int})
+        .multi_intersect(i=[bt().from_dataframe(x).fn for x in [df1, df2]])
+        .to_dataframe(names=[*coltypes], dtype=coltypes)
+    )
     cleanup()
 
     # add some metadata showing if a region covered by only one bed file is
