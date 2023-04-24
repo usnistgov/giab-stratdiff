@@ -19,12 +19,6 @@ def list_strats(
     ignore: list[str] = [],
     mapper: dict[Path, Path] = {},
 ) -> dict[Path, Path]:
-    def apply_mapper(x: Path) -> Path:
-        try:
-            return mapper[x]
-        except KeyError:
-            return x
-
     def apply_pat(pat: list[str], x: Path) -> Path:
         return (
             apply_pat(pat[2:], Path(re.sub(pat[0], pat[1], str(x))))
@@ -32,11 +26,17 @@ def list_strats(
             else x
         )
 
+    def apply_mapper(x: Path) -> Path:
+        try:
+            return mapper[x]
+        except KeyError:
+            return apply_pat(pat, x)
+
     def match_any(s: Path) -> bool:
         return any(map(lambda p: re.match(p, str(s)), ignore))
 
     return {
-        apply_pat(pat, apply_mapper(p)): p
+        apply_mapper(p): p
         for f in scandir(root)
         if f.is_dir()
         for g in scandir(f)
@@ -209,19 +209,30 @@ def compare_all(args) -> None:
         args.ignoreA,
         args.ignoreB,
     )
-    p = Pool()
-    chrs = args.chrs
 
-    anti, diagnostics = unzip(p.map(partial(compare_beds, root1, root2, chrs), ss))
+    if len(ss) > 0:
+        chrs = args.chrs
 
-    def write_df(path: str, df: pd.DataFrame) -> None:
-        df.to_csv(path, header=True, sep="\t", index=False)
+        with Pool() as p:
+            anti, diagnostics = unzip(
+                p.map(
+                    partial(compare_beds, root1, root2, chrs),
+                    ss,
+                    chunksize=1,
+                )
+            )
 
-    write_df(args.prefix + "_anti.bed", pd.concat(anti))
-    write_df(
-        args.prefix + "_diagnostics.tsv",
-        pd.concat(diagnostics).sort_values(by="bedA"),
-    )
+        def write_df(path: str, df: pd.DataFrame) -> None:
+            df.to_csv(path, header=True, sep="\t", index=False)
+
+        write_df(args.prefix + "_anti.bed", pd.concat(anti))
+        write_df(
+            args.prefix + "_diagnostics.tsv",
+            pd.concat(diagnostics).sort_values(by="bedA"),
+        )
+
+    else:
+        print("no overlapping beds to compare")
 
 
 def main():
