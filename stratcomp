@@ -53,13 +53,12 @@ def read_map_file(path: Path) -> dict[Path, Path]:
 def map_strats(
     root1: Path,
     root2: Path,
-    mappath: Path | None,
+    mapper: dict[Path, Path],
     rep: list[str],
     ignoreA: list[str],
     ignoreB: list[str],
 ) -> list[tuple[Path, Path]]:
-    subs = read_map_file(mappath) if mappath is not None else {}
-    ss1 = list_strats(root1, rep, ignoreA, subs)
+    ss1 = list_strats(root1, rep, ignoreA, mapper)
     ss2 = list_strats(root2, [], ignoreB)
     overlap = set(ss1) & set(ss2)
     for f in set(ss1) - set(ss2):
@@ -198,21 +197,20 @@ def compare_beds(
     )
 
 
-def compare_all(args) -> None:
-    root1 = args.strat_rootA
-    root2 = args.strat_rootB
-    ss = map_strats(
-        root1,
-        root2,
-        args.map_path,
-        args.rep,
-        args.ignoreA,
-        args.ignoreB,
-    )
+def compare_all(
+    root1: Path,
+    root2: Path,
+    anti_path: Path,
+    diagnostics_path: Path,
+    mapper: dict[Path, Path],
+    rep: list[str],
+    chrs: list[str],
+    ignoreA: list[str],
+    ignoreB: list[str],
+) -> None:
+    ss = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
 
     if len(ss) > 0:
-        chrs = args.chrs
-
         with Pool() as p:
             anti, diagnostics = unzip(
                 p.map(
@@ -222,12 +220,12 @@ def compare_all(args) -> None:
                 )
             )
 
-        def write_df(path: str, df: pd.DataFrame) -> None:
+        def write_df(path: Path, df: pd.DataFrame) -> None:
             df.to_csv(path, header=True, sep="\t", index=False)
 
-        write_df(args.prefix + "_anti.bed", pd.concat(anti))
+        write_df(anti_path, pd.concat(anti))
         write_df(
-            args.prefix + "_diagnostics.tsv",
+            diagnostics_path,
             pd.concat(diagnostics).sort_values(by="bedA"),
         )
 
@@ -286,7 +284,18 @@ def main():
     )
     args = parser.parse_args()
     assert len(args.rep) % 2 == 0, "replacement args must be even number"
-    compare_all(args)
+    mapper = read_map_file(args.map_path) if args.map_path is not None else {}
+    compare_all(
+        args.strat_rootA,
+        args.strat_rootB,
+        args.prefix + "_anti.bed",
+        args.prefix + "_diagnostics.tsv.gz",
+        mapper,
+        args.rep,
+        args.chrs,
+        args.ignoreA,
+        args.ignoreB,
+    )
 
 
 main()
