@@ -2,3 +2,5 @@
 !stratcomp
 !env.yml
 !README.md
+!lib
+!lib/*
