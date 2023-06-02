@@ -2,6 +2,7 @@
 
 import argparse
 from lib.diff import compare_all, read_map_file
+from more_itertools import chunked
 
 
 def main():
@@ -56,17 +57,19 @@ def main():
     args = parser.parse_args()
     assert len(args.rep) % 2 == 0, "replacement args must be even number"
     mapper = read_map_file(args.map_path) if args.map_path is not None else {}
-    compare_all(
+    logged = compare_all(
         args.strat_rootA,
         args.strat_rootB,
         args.prefix + "_anti.bed",
         args.prefix + "_diagnostics.tsv.gz",
         mapper,
-        args.rep,
+        list(map(tuple, chunked(args.rep, 2))),
         args.chrs,
         args.ignoreA,
         args.ignoreB,
     )
+    for x in logged:
+        print(x)
 
 
 main()

@@ -12,13 +12,13 @@ from more_itertools import unzip
 
 def list_strats(
     root: Path,
-    pat: list[str] = [],
+    pat: list[tuple[str, str]] = [],
     ignore: list[str] = [],
     mapper: dict[Path, Path] = {},
 ) -> dict[Path, Path]:
-    def apply_pat(pat: list[str], x: Path) -> Path:
+    def apply_pat(pat: list[tuple[str, str]], x: Path) -> Path:
         return (
-            apply_pat(pat[2:], Path(re.sub(pat[0], pat[1], str(x))))
+            apply_pat(pat[1:], Path(re.sub(pat[0][0], pat[0][1], str(x))))
             if len(pat) > 0
             else x
         )
@@ -51,18 +51,16 @@ def map_strats(
     root1: Path,
     root2: Path,
     mapper: dict[Path, Path],
-    rep: list[str],
+    rep: list[tuple[str, str]],
     ignoreA: list[str],
     ignoreB: list[str],
-) -> list[tuple[Path, Path]]:
+) -> tuple[list[tuple[Path, Path]], list[str]]:
     ss1 = list_strats(root1, rep, ignoreA, mapper)
     ss2 = list_strats(root2, [], ignoreB)
     overlap = set(ss1) & set(ss2)
-    for f in set(ss1) - set(ss2):
-        print(f"only in A: {f}")
-    for f in set(ss2) - set(ss1):
-        print(f"only in B: {f}")
-    return sorted(
+    logA = [f"only in A: {f}" for f in set(ss1) - set(ss2)]
+    logB = [f"only in B: {f}" for f in set(ss2) - set(ss1)]
+    mapped = sorted(
         [(ss1[f], ss2[f]) for f in overlap],
         key=lambda x: max(
             (root1 / x[0]).stat().st_size,
@@ -70,6 +68,7 @@ def map_strats(
         ),
         reverse=True,
     )
+    return mapped, logA + logB
 
 
 def read_bed(path: Path) -> pd.DataFrame:
@@ -200,12 +199,12 @@ def compare_all(
     anti_path: Path,
     diagnostics_path: Path,
     mapper: dict[Path, Path],
-    rep: list[str],
+    rep: list[tuple[str, str]],
     chrs: list[str],
     ignoreA: list[str],
     ignoreB: list[str],
-) -> None:
-    ss = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
+) -> list[str]:
+    ss, logged = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
 
     if len(ss) > 0:
         with Pool() as p:
@@ -225,6 +224,7 @@ def compare_all(
             diagnostics_path,
             pd.concat(diagnostics).sort_values(by="bedA"),
         )
+        return logged
 
     else:
-        print("no overlapping beds to compare")
+        return logged + ["no overlapping beds to compare"]
