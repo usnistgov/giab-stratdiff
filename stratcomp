@@ -3,6 +3,7 @@
 import argparse
 from lib.diff import compare_all, read_map_file
 from more_itertools import chunked
+from pathlib import Path
 
 
 def main():
@@ -20,7 +21,7 @@ def main():
         metavar="rootB",
         help="directory of second stratification set to compare",
     )
-    parser.add_argument("prefix", metavar="prefix", help="prefix of output")
+    parser.add_argument("dir", metavar="dir", help="dir for output")
     parser.add_argument(
         "-c",
         "--chrs",
@@ -60,8 +61,7 @@ def main():
     logged = compare_all(
         args.strat_rootA,
         args.strat_rootB,
-        args.prefix + "_anti.bed",
-        args.prefix + "_diagnostics.tsv.gz",
+        Path(args.dir),
         mapper,
         list(map(tuple, chunked(args.rep, 2))),
         args.chrs,

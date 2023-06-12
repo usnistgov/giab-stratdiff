@@ -7,7 +7,6 @@ from pathlib import Path
 from pybedtools import BedTool as bt  # type: ignore
 from pybedtools import cleanup  # type: ignore
 from functools import partial
-from more_itertools import unzip
 
 
 def list_strats(
@@ -84,14 +83,23 @@ def read_bed(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def write_df(path: Path, df: pd.DataFrame) -> None:
+    df.to_csv(path, header=True, sep="\t", index=False)
+
+
 def compare_beds(
     root1: Path,
     root2: Path,
+    outdir: Path,
     chrs: list[str],
     bed_paths: tuple[Path, Path],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     bed1 = bed_paths[0]
     bed2 = bed_paths[1]
+
+    def write_anti(df) -> None:
+        if not df.empty:
+            write_df(outdir / str(bed1).replace("/", "_"), df)
 
     def to_diagnostics(total_A: int, total_B: int, total_shared: int):
         return pd.DataFrame(
@@ -108,8 +116,7 @@ def compare_beds(
         )
 
     def add_bed_names(df: pd.DataFrame) -> pd.DataFrame:
-        df["bedA"] = bed1
-        df["bedB"] = bed2
+        df["other_bed"] = bed2
         return df
 
     def bed_sum(df: pd.DataFrame) -> int:
@@ -123,11 +130,13 @@ def compare_beds(
 
     if df1.empty:
         df = add_bed_names(df2.assign(**{"bed": 1, "adj": "."}))
-        return (df, to_diagnostics(0, bed_sum(df), 0))
+        write_anti(df)
+        return to_diagnostics(0, bed_sum(df), 0)
 
     if df2.empty:
         df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
-        return (df, to_diagnostics(bed_sum(df), 0, 0))
+        write_anti(df)
+        return to_diagnostics(bed_sum(df), 0, 0)
 
     coltypes = {
         "chrom": str,
@@ -180,24 +189,22 @@ def compare_beds(
     )
     anti = anti[["chrom", "start", "end", "bed", "adj"]].copy()
     anti["length"] = anti["end"] - anti["start"]
-    anti["bedA"] = str(bed1).replace(".bed.gz", "")
-    anti["bedB"] = str(bed2).replace(".bed.gz", "")
+    anti["other_bed"] = str(bed2).replace(".bed.gz", "")
 
     length = df["end"] - df["start"]
     total_shared = length[shared].sum()
     total_A = length[df["inA"] == 1].sum()
     total_B = length[df["inB"] == 1].sum()
-    return (
-        anti.rename(columns={"chrom": "#chrom"}),
-        to_diagnostics(total_A, total_B, total_shared),
-    )
+
+    write_anti(anti.rename(columns={"chrom": "#chrom"}))
+
+    return to_diagnostics(total_A, total_B, total_shared)
 
 
 def compare_all(
     root1: Path,
     root2: Path,
-    anti_path: Path,
-    diagnostics_path: Path,
+    outdir: Path,
     mapper: dict[Path, Path],
     rep: list[tuple[str, str]],
     chrs: list[str],
@@ -207,21 +214,16 @@ def compare_all(
     ss, logged = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
 
     if len(ss) > 0:
+        outdir.mkdir(parents=True, exist_ok=True)
         with Pool() as p:
-            anti, diagnostics = unzip(
-                p.map(
-                    partial(compare_beds, root1, root2, chrs),
-                    ss,
-                    chunksize=1,
-                )
+            diagnostics = p.map(
+                partial(compare_beds, root1, root2, outdir, chrs),
+                ss,
+                chunksize=1,
             )
 
-        def write_df(path: Path, df: pd.DataFrame) -> None:
-            df.to_csv(path, header=True, sep="\t", index=False)
-
-        write_df(anti_path, pd.concat(anti))
         write_df(
-            diagnostics_path,
+            outdir / "diagnostics.tsv",
             pd.concat(diagnostics).sort_values(by="bedA"),
         )
         return logged
