@@ -48,8 +48,8 @@ def read_map_file(path: Path) -> dict[Path, Path]:
 
 
 def to_diagnostics(
-    bed1: Path | None,
-    bed2: Path | None,
+    bed1: str | None,
+    bed2: str | None,
     total_A: int,
     total_B: int,
     total_shared: int,
@@ -61,8 +61,8 @@ def to_diagnostics(
         "total_shared": total_shared,
         "shared_A": total_shared / total_A * 100 if total_A > 0 else 0,
         "shared_B": total_shared / total_B * 100 if total_B > 0 else 0,
-        "bedA": str(bed1) if bed1 is not None else "",
-        "bedB": str(bed2) if bed2 is not None else "",
+        "bedA": bed1 if bed1 is not None else "",
+        "bedB": bed2 if bed2 is not None else "",
     }
 
 
@@ -86,12 +86,13 @@ def bed_sum(df: pd.DataFrame) -> int:
         return (df["end"] - df["start"]).sum()
 
 
-def read_a(path: Path) -> dict[str, int | float | str]:
-    return to_diagnostics(path, None, bed_sum(read_bed(path)), 0, 0)
+# first member is the local path/key, second is the full path
+def read_a(p: tuple[Path, Path]) -> dict[str, int | float | str]:
+    return to_diagnostics(str(p[0]), None, bed_sum(read_bed(p[1])), 0, 0)
 
 
-def read_b(path: Path) -> dict[str, int | float | str]:
-    return to_diagnostics(None, path, 0, bed_sum(read_bed(path)), 0)
+def read_b(p: tuple[Path, Path]) -> dict[str, int | float | str]:
+    return to_diagnostics(None, str(p[0]), 0, bed_sum(read_bed(p[1])), 0)
 
 
 def map_strats(
@@ -114,8 +115,8 @@ def map_strats(
         reverse=True,
     )
     with Pool() as p:
-        a_only = p.map(read_a, [root1 / ss1[k] for k in set(ss1) - set(ss2)])
-        b_only = p.map(read_b, [root2 / ss2[k] for k in set(ss2) - set(ss1)])
+        a_only = p.map(read_a, [(k, root1 / ss1[k]) for k in set(ss1) - set(ss2)])
+        b_only = p.map(read_b, [(k, root2 / ss2[k]) for k in set(ss2) - set(ss1)])
         return mapped, a_only + b_only
 
 
@@ -150,12 +151,12 @@ def compare_beds(
     if df1.empty:
         df = add_bed_names(df2.assign(**{"bed": 1, "adj": "."}))
         write_anti(df)
-        return to_diagnostics(bed1, bed2, 0, bed_sum(df), 0)
+        return to_diagnostics(str(bed1), str(bed2), 0, bed_sum(df), 0)
 
     if df2.empty:
         df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
         write_anti(df)
-        return to_diagnostics(bed1, bed2, bed_sum(df), 0, 0)
+        return to_diagnostics(str(bed1), str(bed2), bed_sum(df), 0, 0)
 
     coltypes = {
         "chrom": str,
@@ -217,7 +218,7 @@ def compare_beds(
 
     write_anti(anti.rename(columns={"chrom": "#chrom"}))
 
-    return to_diagnostics(bed1, bed2, total_A, total_B, total_shared)
+    return to_diagnostics(str(bed1), str(bed2), total_A, total_B, total_shared)
 
 
 def compare_all(
