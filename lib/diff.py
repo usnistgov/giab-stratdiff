@@ -6,7 +6,7 @@ from multiprocessing import Pool
 from os import scandir
 from pathlib import Path
 from pybedtools import BedTool as bt  # type: ignore
-from pybedtools import cleanup  # type: ignore
+from pybedtools import cleanup
 from functools import partial
 
 
@@ -83,7 +83,7 @@ def bed_sum(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
     else:
-        return (df["end"] - df["start"]).sum()
+        return int((df["end"] - df["start"]).sum())
 
 
 # first member is the local path/key, second is the full path
@@ -154,7 +154,7 @@ def compare_beds(
     bed1 = bed_paths[0]
     bed2 = bed_paths[1]
 
-    def write_anti(df) -> None:
+    def write_anti(df: pd.DataFrame) -> None:
         if not df.empty:
             write_df(outdir / str(bed1).replace("/", "_"), df)
 
