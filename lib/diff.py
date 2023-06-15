@@ -87,17 +87,31 @@ def bed_sum(df: pd.DataFrame) -> int:
 
 
 # first member is the local path/key, second is the full path
-def read_a(p: tuple[Path, Path]) -> dict[str, int | float | str]:
-    return to_diagnostics(str(p[0]), None, bed_sum(read_bed(p[1])), 0, 0)
+def read_diagnostics(
+    is_a: bool,
+    chrs: list[str],
+    p: tuple[Path, Path],
+) -> dict[str, int | float | str]:
+    key = str(p[0])
+    df = read_bed(p[1])
+    if not df.empty and len(chrs) > 0:
+        df = df[df["chrom"].isin(chrs)]
+    t = bed_sum(df)
+    return (
+        to_diagnostics(key, None, t, 0, 0)
+        if is_a
+        else to_diagnostics(None, key, 0, t, 0)
+    )
 
 
-def read_b(p: tuple[Path, Path]) -> dict[str, int | float | str]:
-    return to_diagnostics(None, str(p[0]), 0, bed_sum(read_bed(p[1])), 0)
+# def read_b(p: tuple[Path, Path]) -> dict[str, int | float | str]:
+#     return to_diagnostics(None, str(p[0]), 0, bed_sum(read_bed(p[1])), 0)
 
 
 def map_strats(
     root1: Path,
     root2: Path,
+    chrs: list[str],
     mapper: dict[Path, Path],
     rep: list[tuple[str, str]],
     ignoreA: list[str],
@@ -115,8 +129,14 @@ def map_strats(
         reverse=True,
     )
     with Pool() as p:
-        a_only = p.map(read_a, [(k, root1 / ss1[k]) for k in set(ss1) - set(ss2)])
-        b_only = p.map(read_b, [(k, root2 / ss2[k]) for k in set(ss2) - set(ss1)])
+        a_only = p.map(
+            partial(read_diagnostics, True, chrs),
+            [(k, root1 / ss1[k]) for k in set(ss1) - set(ss2)],
+        )
+        b_only = p.map(
+            partial(read_diagnostics, False, chrs),
+            [(k, root2 / ss2[k]) for k in set(ss2) - set(ss1)],
+        )
         return mapped, a_only + b_only
 
 
@@ -231,7 +251,7 @@ def compare_all(
     ignoreA: list[str],
     ignoreB: list[str],
 ) -> list[str]:
-    ss, nonoverlap = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
+    ss, nonoverlap = map_strats(root1, root2, chrs, mapper, rep, ignoreA, ignoreB)
 
     if len(ss) > 0:
         outdir.mkdir(parents=True, exist_ok=True)
