@@ -1,4 +1,5 @@
 import re
+import gzip
 import pandas as pd
 import numpy as np
 from multiprocessing import Pool
@@ -46,28 +47,23 @@ def read_map_file(path: Path) -> dict[Path, Path]:
     return {Path(r[0]): Path(r[1]) for r in df.itertuples(index=False)}
 
 
-def map_strats(
-    root1: Path,
-    root2: Path,
-    mapper: dict[Path, Path],
-    rep: list[tuple[str, str]],
-    ignoreA: list[str],
-    ignoreB: list[str],
-) -> tuple[list[tuple[Path, Path]], list[str]]:
-    ss1 = list_strats(root1, rep, ignoreA, mapper)
-    ss2 = list_strats(root2, [], ignoreB)
-    overlap = set(ss1) & set(ss2)
-    logA = [f"only in A: {f}" for f in set(ss1) - set(ss2)]
-    logB = [f"only in B: {f}" for f in set(ss2) - set(ss1)]
-    mapped = sorted(
-        [(ss1[f], ss2[f]) for f in overlap],
-        key=lambda x: max(
-            (root1 / x[0]).stat().st_size,
-            (root2 / x[1]).stat().st_size,
-        ),
-        reverse=True,
-    )
-    return mapped, logA + logB
+def to_diagnostics(
+    bed1: Path | None,
+    bed2: Path | None,
+    total_A: int,
+    total_B: int,
+    total_shared: int,
+) -> dict[str, int | float | str]:
+    return {
+        "total_A": total_A,
+        "total_B": total_B,
+        "diff_AB": "" if bed1 is None or bed2 is None else total_A - total_B,
+        "total_shared": total_shared,
+        "shared_A": total_shared / total_A * 100 if total_A > 0 else 0,
+        "shared_B": total_shared / total_B * 100 if total_B > 0 else 0,
+        "bedA": str(bed1) if bed1 is not None else "",
+        "bedB": str(bed2) if bed2 is not None else "",
+    }
 
 
 def read_bed(path: Path) -> pd.DataFrame:
@@ -79,8 +75,48 @@ def read_bed(path: Path) -> pd.DataFrame:
             names=["chrom", "start", "end"],
             comment="#",
         )
-    except pd.errors.EmptyDataError:
+    except (gzip.BadGzipFile, pd.errors.EmptyDataError):
         return pd.DataFrame()
+
+
+def bed_sum(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    else:
+        return (df["end"] - df["start"]).sum()
+
+
+def read_a(path: Path) -> dict[str, int | float | str]:
+    return to_diagnostics(path, None, bed_sum(read_bed(path)), 0, 0)
+
+
+def read_b(path: Path) -> dict[str, int | float | str]:
+    return to_diagnostics(None, path, 0, bed_sum(read_bed(path)), 0)
+
+
+def map_strats(
+    root1: Path,
+    root2: Path,
+    mapper: dict[Path, Path],
+    rep: list[tuple[str, str]],
+    ignoreA: list[str],
+    ignoreB: list[str],
+) -> tuple[list[tuple[Path, Path]], list[dict[str, int | float | str]]]:
+    ss1 = list_strats(root1, rep, ignoreA, mapper)
+    ss2 = list_strats(root2, [], ignoreB)
+    overlap = set(ss1) & set(ss2)
+    mapped = sorted(
+        [(ss1[f], ss2[f]) for f in overlap],
+        key=lambda x: max(
+            (root1 / x[0]).stat().st_size,
+            (root2 / x[1]).stat().st_size,
+        ),
+        reverse=True,
+    )
+    with Pool() as p:
+        a_only = p.map(read_a, [root1 / ss1[k] for k in set(ss1) - set(ss2)])
+        b_only = p.map(read_b, [root2 / ss2[k] for k in set(ss2) - set(ss1)])
+        return mapped, a_only + b_only
 
 
 def write_df(path: Path, df: pd.DataFrame) -> None:
@@ -93,7 +129,7 @@ def compare_beds(
     outdir: Path,
     chrs: list[str],
     bed_paths: tuple[Path, Path],
-) -> pd.DataFrame:
+) -> dict[str, int | float | str]:
     bed1 = bed_paths[0]
     bed2 = bed_paths[1]
 
@@ -101,26 +137,9 @@ def compare_beds(
         if not df.empty:
             write_df(outdir / str(bed1).replace("/", "_"), df)
 
-    def to_diagnostics(total_A: int, total_B: int, total_shared: int):
-        return pd.DataFrame(
-            {
-                "total_A": [total_A],
-                "total_B": [total_B],
-                "diff_AB": total_A - total_B,
-                "total_shared": [total_shared],
-                "shared_A": [total_shared / total_A * 100] if total_A > 0 else 0,
-                "shared_B": [total_shared / total_B * 100] if total_B > 0 else 0,
-                "bedA": [bed1],
-                "bedB": [bed2],
-            }
-        )
-
     def add_bed_names(df: pd.DataFrame) -> pd.DataFrame:
         df["other_bed"] = bed2
         return df
-
-    def bed_sum(df: pd.DataFrame) -> int:
-        return (df["end"] - df["start"]).sum()
 
     df1 = read_bed(root1 / bed1)
     df2 = read_bed(root2 / bed2)
@@ -131,12 +150,12 @@ def compare_beds(
     if df1.empty:
         df = add_bed_names(df2.assign(**{"bed": 1, "adj": "."}))
         write_anti(df)
-        return to_diagnostics(0, bed_sum(df), 0)
+        return to_diagnostics(bed1, bed2, 0, bed_sum(df), 0)
 
     if df2.empty:
         df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
         write_anti(df)
-        return to_diagnostics(bed_sum(df), 0, 0)
+        return to_diagnostics(bed1, bed2, bed_sum(df), 0, 0)
 
     coltypes = {
         "chrom": str,
@@ -198,7 +217,7 @@ def compare_beds(
 
     write_anti(anti.rename(columns={"chrom": "#chrom"}))
 
-    return to_diagnostics(total_A, total_B, total_shared)
+    return to_diagnostics(bed1, bed2, total_A, total_B, total_shared)
 
 
 def compare_all(
@@ -211,7 +230,7 @@ def compare_all(
     ignoreA: list[str],
     ignoreB: list[str],
 ) -> list[str]:
-    ss, logged = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
+    ss, nonoverlap = map_strats(root1, root2, mapper, rep, ignoreA, ignoreB)
 
     if len(ss) > 0:
         outdir.mkdir(parents=True, exist_ok=True)
@@ -224,9 +243,9 @@ def compare_all(
 
         write_df(
             outdir / "diagnostics.tsv",
-            pd.concat(diagnostics).sort_values(by="bedA"),
+            pd.DataFrame(nonoverlap + diagnostics).sort_values(by=["bedA", "bedB"]),
         )
-        return logged
+        return []
 
     else:
-        return logged + ["no overlapping beds to compare"]
+        return ["no overlapping beds to compare"]
