@@ -1,10 +1,11 @@
 import re
 import tempfile
+import shutil
 from contextlib import contextmanager
 import gzip
 import pandas as pd
 import numpy as np
-from typing import Generator, IO
+from typing import Generator
 from multiprocessing import Pool
 import os
 from pathlib import Path
@@ -106,10 +107,6 @@ def read_diagnostics(
     )
 
 
-# def read_b(p: tuple[Path, Path]) -> dict[str, int | float | str]:
-#     return to_diagnostics(None, str(p[0]), 0, bed_sum(read_bed(p[1])), 0)
-
-
 def map_strats(
     root1: Path,
     root2: Path,
@@ -146,7 +143,7 @@ def write_df(path: Path, df: pd.DataFrame) -> None:
     df.to_csv(path, header=True, sep="\t", index=False)
 
 
-def gzip_is_empty(p: Path):
+def gzip_is_not_empty(p: Path):
     with gzip.open(p, "rb") as f:
         try:
             return len(f.read(1)) > 0
@@ -155,29 +152,39 @@ def gzip_is_empty(p: Path):
 
 
 @contextmanager
-def temp_fifo() -> Generator[Path, None, None]:
+def temp_bed() -> Generator[Path, None, None]:
     """Context Manager for creating named pipes with temporary names."""
     tmpdir = tempfile.mkdtemp()
-    filename = Path(tmpdir) / "fifo"
-    os.mkfifo(filename)
+    filename = Path(tmpdir) / "bed.gz"
     try:
         yield filename
     finally:
-        os.unlink(filename)
-        os.rmdir(tmpdir)
+        shutil.rmtree(tmpdir)
 
 
-def read_bed(i: Path, o: IO[bytes], chrs: list[str]) -> sp.Popen[bytes]:
-    if len(chrs) > 0:
-        p1 = sp.Popen(["gunzip", "-c", str(i)], stdout=sp.PIPE)
-        filt = f"^({'|'.join(chrs)})"
-        p2 = sp.Popen(["grep", "-e", filt], stdout=o)
-        assert p1.stdout is not None
-        p1.stdout.close()
-        return p2
+def filter_bed(i: Path, o: Path, chrs: list[str]) -> int:
+    n = 0
+    filt = tuple([c.encode() for c in chrs])
+    with gzip.open(i, "rb") as fi, gzip.open(o, "wb") as fo:
+        for x in fi:
+            if x.startswith(filt):
+                fo.write(x)
+                n += 1
+    return n
+
+
+def read_bed(i: Path, o: Path, chrs: list[str]) -> Path | None:
+    if gzip_is_not_empty(i):
+        if len(chrs) == 0:
+            return i
+        else:
+            n = filter_bed(i, o, chrs)
+            if n > 0:
+                return o
+            else:
+                return None
     else:
-        p1 = sp.Popen(["gunzip", "-c", str(i)], stdout=o)
-        return p1
+        return None
 
 
 def compare_beds(
@@ -189,43 +196,59 @@ def compare_beds(
 ) -> dict[str, int | float | str]:
     bed1 = bed_paths[0]
     bed2 = bed_paths[1]
+    bed1_path = root1 / bed1
+    bed2_path = root2 / bed2
 
     def write_anti(df: pd.DataFrame) -> None:
         if not df.empty:
             write_df(outdir / str(bed1).replace("/", "_"), df)
 
-    # test if either is empty first, else read both and filter them
+    def write_empty(use1: bool) -> dict[str, int | float | str]:
+        path, bedi = (bed1_path, 0) if use1 else (bed2_path, 1)
+        df = read_bed_df(path).assign(**{"bed": bedi, "adj": "."})
+        df["other_bed"] = bed2
+        write_anti(df)
+        sum0, sum1 = (bed_sum(df), 0) if use1 else (0, bed_sum(df))
+        return to_diagnostics(str(bed1), str(bed2), sum0, sum1, 0)
 
-    with temp_fifo() as b1, temp_fifo() as b2:
+    with temp_bed() as t1, temp_bed() as t2:
+        b1 = read_bed(root1 / bed1, t1, chrs)
+        b2 = read_bed(root2 / bed2, t2, chrs)
+
+        if b1 is None and b2 is None:
+            return to_diagnostics(str(bed1), str(bed2), 0, 0, 0)
+
+        if b1 is None:
+            return write_empty(False)
+
+        if b2 is None:
+            return write_empty(True)
+
         p = sp.Popen(
             ["multiIntersectBed", "-i", str(b1), str(b2)],
             stdout=sp.PIPE,
         )
         assert p.stdout is not None
 
-        with open(b1, "wb") as w1:
-            p1 = read_bed(root1 / bed1, w1, chrs)
-            with open(b2, "wb") as w2:
-                p2 = read_bed(root2 / bed2, w2, chrs)
-
-                coltypes = {
-                    "chrom": str,
-                    "start": int,
-                    "end": int,
-                    "shared": int,
-                    "list": str,
-                    "inA": int,
-                    "inB": int,
-                }
-                df = pd.read_table(
-                    p.stdout,
-                    names=list(coltypes),
-                    dtype=coltypes,
-                    usecols=["chrom", "start", "end", "shared", "inA"],
-                )
+        coltypes = {
+            "chrom": str,
+            "start": int,
+            "end": int,
+            "shared": int,
+            "list": str,
+            "inA": int,
+            "inB": int,
+        }
+        df = pd.read_table(
+            p.stdout,
+            names=list(coltypes),
+            dtype=coltypes,
+            usecols=["chrom", "start", "end", "shared", "inA", "inB"],
+        )
 
         df["shared"] = df["shared"] == 2
         df["inA"] = df["inA"] == 1
+        df["inB"] = df["inB"] == 1
 
         # add some metadata showing if a region covered by only one bed file is
         # adjacent to a region covered by both
@@ -258,14 +281,14 @@ def compare_beds(
                 ),
             ),
         )
-        df["bed"] = np.where(df["inA"], 0, 1)
+        df["bed"] = np.where(df["inA"], 0, np.where(df["inB"], 1, -1))
 
         length = df["end"] - df["start"]
         df["length"] = length
 
         total_shared = length[df["shared"]].sum()
         total_A = length[df["inA"]].sum()
-        total_B = length[~df["inA"]].sum()
+        total_B = length[df["inB"]].sum()
 
         anti = df[~df["shared"]][
             ["chrom", "start", "end", "bed", "adj", "length"]
@@ -281,111 +304,6 @@ def compare_beds(
             total_B,
             total_shared,
         )
-
-
-# def compare_beds(
-#     root1: Path,
-#     root2: Path,
-#     outdir: Path,
-#     chrs: list[str],
-#     bed_paths: tuple[Path, Path],
-# ) -> dict[str, int | float | str]:
-#     bed1 = bed_paths[0]
-#     bed2 = bed_paths[1]
-
-#     def write_anti(df: pd.DataFrame) -> None:
-#         if not df.empty:
-#             write_df(outdir / str(bed1).replace("/", "_"), df)
-
-#     def add_bed_names(df: pd.DataFrame) -> pd.DataFrame:
-#         df["other_bed"] = bed2
-#         return df
-
-#     df1 = read_bed(root1 / bed1)
-#     df2 = read_bed(root2 / bed2)
-#     if len(chrs) > 0:
-#         df1 = df1[df1["chrom"].isin(chrs)]
-#         df2 = df2[df2["chrom"].isin(chrs)]
-
-#     if df1.empty:
-#         df = add_bed_names(df2.assign(**{"bed": 1, "adj": "."}))
-#         write_anti(df)
-#         return to_diagnostics(str(bed1), str(bed2), 0, bed_sum(df), 0)
-
-#     if df2.empty:
-#         df = add_bed_names(df1.assign(**{"bed": 0, "adj": "."}))
-#         write_anti(df)
-#         return to_diagnostics(str(bed1), str(bed2), bed_sum(df), 0, 0)
-
-#     coltypes = {
-#         "chrom": str,
-#         "start": int,
-#         "end": int,
-#         "n": int,
-#         "list": str,
-#         "inA": int,
-#         "inB": int,
-#     }
-
-#     df = (
-#         bt()
-#         .multi_intersect(i=[bt().from_dataframe(x).fn for x in [df1, df2]])
-#         .to_dataframe(names=[*coltypes], dtype=coltypes)
-#     )
-#     cleanup()
-
-#     # add some metadata showing if a region covered by only one bed file is
-#     # adjacent to a region covered by both
-#     #
-#     # key
-#     # - shared = shared by both
-#     # - <> = in between two shared regions
-#     # - < = to the right of a shared region
-#     # - > = to the left of a shared region
-#     # - . = not adjacent to a shared region
-#     df_chr = df.groupby("chrom")
-#     prev_adj = df["start"] == df_chr["end"].shift(1, fill_value=-1)
-#     next_adj = df_chr["start"].shift(-1, fill_value=-1) == df["end"]
-#     prev_adj_shared = prev_adj & (df_chr["n"].shift(1, fill_value=-1) == 2)
-#     next_adj_shared = next_adj & (df_chr["n"].shift(-1, fill_value=-1) == 2)
-#     df["adj"] = np.where(
-#         df["n"] > 1,
-#         "shared",
-#         np.where(
-#             prev_adj_shared & next_adj_shared,
-#             "<>",
-#             np.where(
-#                 next_adj_shared,
-#                 ">",
-#                 np.where(
-#                     prev_adj_shared,
-#                     "<",
-#                     ".",
-#                 ),
-#             ),
-#         ),
-#     )
-#     shared = df["adj"] == "shared"
-
-#     anti = df[~shared].copy()
-#     anti["bed"] = np.where(
-#         anti["inA"] == 1,
-#         0,
-#         np.where(anti["inB"] == 1, 1, -1),
-#     )
-#     anti = anti[["chrom", "start", "end", "bed", "adj"]].copy()
-#     anti["length"] = anti["end"] - anti["start"]
-#     anti["other_bed"] = str(bed2).replace(".bed.gz", "")
-
-#     length = df["end"] - df["start"]
-#     total_shared = length[shared].sum()
-#     total_A = length[df["inA"] == 1].sum()
-#     total_B = length[df["inB"] == 1].sum()
-
-#     write_anti(anti.rename(columns={"chrom": "#chrom"}))
-
-#     return to_diagnostics(str(bed1), str(bed2), total_A, total_B,
-# total_shared,)
 
 
 def compare_all(
