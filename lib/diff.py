@@ -143,7 +143,7 @@ def write_df(path: Path, df: pd.DataFrame) -> None:
     df.to_csv(path, header=True, sep="\t", index=False)
 
 
-def gzip_is_not_empty(p: Path):
+def gzip_is_not_empty(p: Path) -> bool:
     with gzip.open(p, "rb") as f:
         try:
             return len(f.read(1)) > 0
